@@ -507,10 +507,11 @@ def extract_table(text, statement_name):
     
     Your task: Find and extract the "{statement_name}" table from the provided text.
     
-    PRIORITY RULES (VERY IMPORTANT):
-    1. **QUARTERLY DATA PRIORITY**: If both quarterly and yearly data are available, ALWAYS choose quarterly data (Q1, Q2, Q3, Q4, or quarter-end dates like "31 Mar", "30 Jun", "30 Sep", "31 Dec")
-    2. **GROUP vs COMPANY PRIORITY**: If both "Group" and "Company" tables exist for the same statement, ALWAYS choose the "Group" table
+    PRIORITY RULES (CRITICAL - MUST FOLLOW):
+    1. **QUARTERLY DATA MANDATORY**: ALWAYS choose quarterly data (Q1, Q2, Q3, Q4, or quarter-end dates like "31 Mar", "30 Jun", "30 Sep", "31 Dec") - NEVER use annual data
+    2. **GROUP/CONSOLIDATED MANDATORY**: ALWAYS choose "Group" or "CONSOLIDATED" tables over "Company" tables
     3. **MOST RECENT QUARTER**: When multiple quarters are available, prioritize the most recent quarter
+    4. **SKIP NON-QUARTERLY**: If no quarterly data is available, return "No quarterly data found" instead of annual data
     
     CRITICAL EXTRACTION REQUIREMENTS:
     1. **INCLUDE ALL ROW DESCRIPTIONS**: Always include the full description/name of each line item in the first column
@@ -518,7 +519,9 @@ def extract_table(text, statement_name):
     3. **COMPLETE LINE ITEMS**: Don't abbreviate or truncate the descriptions of financial statement items
     4. **EXACT COLUMN HEADERS**: Use the original column titles from the document without modification
     5. **ALL NUMERICAL VALUES**: Include every number exactly as shown (including ('000) notation)
-    6. **PROPER FORMATTING**: Create a clean markdown table but preserve all original content
+    6. **PRESERVE DASHES**: When a column has a dash (-), keep it as a dash - do NOT replace with values from other columns
+    7. **MAINTAIN COLUMN ALIGNMENT**: Ensure each value stays in its correct column - dashes indicate no value for that period
+    8. **PROPER FORMATTING**: Create a clean markdown table but preserve all original content and alignment
     
     WHAT TO INCLUDE:
     ✅ Full line item descriptions (e.g., "Revenue", "Cost of goods sold", "Gross profit", etc.)
@@ -535,11 +538,11 @@ def extract_table(text, statement_name):
     ❌ Changing column header names
     ❌ Omitting any rows or data
     
-    TABLE SELECTION LOGIC:
-    - Search for tables with "Group" in the title first, then "Company" as fallback
-    - Look for quarterly dates (Mar, Jun, Sep, Dec) before annual dates
-    - Prioritize tables with "Q1", "Q2", "Q3", "Q4" indicators
-    - Choose tables with quarter-end dates over year-end dates
+    TABLE SELECTION LOGIC (MANDATORY):
+    - ONLY search for tables with "Group" or "CONSOLIDATED" in the title
+    - ONLY look for quarterly dates (Mar, Jun, Sep, Dec, Q1, Q2, Q3, Q4)
+    - NEVER use annual data or Company tables
+    - If no quarterly Group/CONSOLIDATED data found, return "No quarterly Group/CONSOLIDATED data found"
     
     EXAMPLE FORMAT:
     | Line Item Description | 2024 Rs.'000 | 2023 Rs.'000 |
@@ -548,13 +551,14 @@ def extract_table(text, statement_name):
     | Cost of sales        | (90,000)     | (85,000)     |
     | Gross profit         | 60,000       | 55,000       |
     
-    QUALITY CHECKS:
+    QUALITY CHECKS (MANDATORY):
     - Every row has a meaningful description in the first column
     - All numerical values are preserved with original formatting
     - Column headers match the source document exactly
     - Hierarchical structure is maintained (main items, sub-items, totals)
-    - Group table selected over Company table when both exist
-    - Quarterly data selected over annual data when both exist
+    - ONLY Group/CONSOLIDATED tables are used
+    - ONLY quarterly data is used (no annual data)
+    - If no quarterly Group/CONSOLIDATED data exists, return appropriate message
     
     Return ONLY the clean markdown table with complete descriptions and original headers. No explanations, no extra text."""
 
@@ -602,10 +606,11 @@ def extract_changes_in_equity(text):
        - "Other comprehensive income"
        - "Balance at end of period"
     
-    PRIORITY RULES (VERY IMPORTANT):
-    1. **QUARTERLY DATA PRIORITY**: Choose quarterly data over annual data
-    2. **GROUP vs COMPANY PRIORITY**: Choose "Group" table over "Company" table
+    PRIORITY RULES (CRITICAL - MUST FOLLOW):
+    1. **QUARTERLY DATA MANDATORY**: ALWAYS choose quarterly data - NEVER use annual data
+    2. **GROUP/CONSOLIDATED MANDATORY**: ALWAYS choose "Group" or "CONSOLIDATED" table over "Company" table
     3. **MOST RECENT QUARTER**: Prioritize the most recent quarter
+    4. **SKIP NON-QUARTERLY**: If no quarterly data is available, return "No quarterly Group/CONSOLIDATED data found"
     
     FORMAT REQUIREMENTS:
     - First column MUST contain complete descriptions of equity components and movements
@@ -624,13 +629,14 @@ def extract_changes_in_equity(text):
     | Retained Earnings         | 1,200,000                  | 1,100,000                  |
     | Total Equity              | 3,745,000                  | 3,640,000                  |
     
-    QUALITY CHECKS:
+    QUALITY CHECKS (MANDATORY):
     - Every row has a meaningful, complete description
     - All equity components are clearly identified
     - All movements/transactions are properly described
     - No abbreviated or missing row descriptions
-    - Group table selected over Company table when both exist
-    - Quarterly data selected over annual data when both exist
+    - ONLY Group/CONSOLIDATED tables are used
+    - ONLY quarterly data is used (no annual data)
+    - If no quarterly Group/CONSOLIDATED data exists, return appropriate message
     
     Return ONLY the clean markdown table with complete equity descriptions. No explanations, no extra text."""
 
@@ -661,15 +667,48 @@ def is_ratio_or_percentage_column(col_name):
 
 # ('000) value conversion removed as per user request
 
+def validate_column_alignment(df):
+    """Validate and fix column alignment issues, ensuring dashes are preserved correctly"""
+    if df.empty or len(df.columns) < 2:
+        return df
+    
+    # Check for potential column misalignment issues
+    for col_idx, col in enumerate(df.columns):
+        if col_idx == 0:  # Skip the first column (usually row descriptions)
+            continue
+            
+        col_values = df[col].astype(str).str.strip()
+        
+        # Check if this column has a high percentage of dashes (might indicate misalignment)
+        dash_count = col_values.isin(['-', '--', '---']).sum()
+        total_count = len(col_values)
+        
+        if total_count > 0 and dash_count / total_count > 0.8:
+            print(f"⚠️ Warning: Column '{col}' has {dash_count}/{total_count} dashes - possible misalignment")
+            
+            # Check if the next column has values that might belong to this column
+            if col_idx + 1 < len(df.columns):
+                next_col = df.columns[col_idx + 1]
+                next_col_values = df[next_col].astype(str).str.strip()
+                next_col_numeric_count = sum(1 for val in next_col_values if val and val not in ['-', '--', '---', 'nan', 'NaN', 'None', ''] and val.replace(',', '').replace('.', '').replace('-', '').isdigit())
+                
+                if next_col_numeric_count > dash_count:
+                    print(f"  🔧 Potential fix: Values from '{next_col}' might belong in '{col}'")
+    
+    return df
+
 def clean_dataframe(df):
-    """Clean the dataframe to remove NaN columns and improve data quality"""
-    # Remove completely empty columns
+    """Clean the dataframe to remove NaN columns and improve data quality while preserving dashes"""
+    # Remove completely empty columns (but be careful about columns with dashes)
     df = df.dropna(axis=1, how='all')
     
     # Remove columns that are just separators (contain only dashes, pipes, spaces)
+    # BUT be more careful - only remove if ALL values are separators
     cols_to_drop = []
     for col in df.columns:
-        if df[col].astype(str).str.strip().str.match(r'^[-|\s]*$').all():
+        col_values = df[col].astype(str).str.strip()
+        # Only drop if ALL values are just separators (dashes, pipes, spaces) AND no meaningful data
+        if col_values.str.match(r'^[-|\s]*$').all() and not any(val in ['-', '--', '---'] for val in col_values):
             cols_to_drop.append(col)
     df = df.drop(columns=cols_to_drop)
     
@@ -678,12 +717,16 @@ def clean_dataframe(df):
     df.columns = [col for col in df.columns if not col.startswith('Unnamed')]
     
     # Remove rows that are completely empty or just separators
+    # BUT preserve rows that have meaningful data even if some columns have dashes
     df = df[~df.astype(str).apply(lambda x: x.str.strip().str.match(r'^[-|\s]*$')).all(axis=1)]
     
     # Replace various forms of empty values with empty string, but PRESERVE dashes
     # Dashes should be kept as dashes, not replaced with empty strings
     df = df.replace(['nan', 'NaN', 'None'], '')
     # Note: We intentionally do NOT replace dashes here to preserve them in the data
+    
+    # Validate column alignment
+    df = validate_column_alignment(df)
     
     return df
 
@@ -701,18 +744,31 @@ def markdown_to_df(md_table):
         
         cleaned_md = '\n'.join(cleaned_lines)
         
+        # Use more robust parsing to preserve column alignment
         df = pd.read_table(StringIO(cleaned_md), sep="|", engine="python", header=0, skipinitialspace=True)
+        
+        # Clean column names but preserve structure
         df.columns = [c.strip() for c in df.columns]
         
-        # Remove unnamed/empty columns
-        df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
-        df = df.loc[:, df.columns != ""]
-        
-        # Clean each column
+        # Remove unnamed/empty columns but be careful not to remove columns with dashes
+        cols_to_keep = []
         for col in df.columns:
-            df[col] = df[col].astype(str).str.strip()
+            if not col.startswith('Unnamed') and col != "":
+                cols_to_keep.append(col)
         
-        # Apply additional cleaning
+        if cols_to_keep:
+            df = df[cols_to_keep]
+        
+        # Clean each column but PRESERVE dashes
+        for col in df.columns:
+            # Convert to string and strip whitespace, but preserve dashes
+            df[col] = df[col].astype(str).str.strip()
+            # Ensure dashes are preserved as dashes, not converted to NaN
+            df[col] = df[col].replace('nan', '-')
+            df[col] = df[col].replace('NaN', '-')
+            df[col] = df[col].replace('None', '-')
+        
+        # Apply additional cleaning but preserve dashes
         df = clean_dataframe(df)
         
         return df
@@ -857,7 +913,7 @@ def fmt_value(value):
 
 def find_value_in_dataframes_intelligent(search_terms, dataframes, exact_match=False):
     """Enhanced intelligent value finder using AI knowledge and semantic understanding
-    Priority: Latest quarter GROUP table values over annual or company values
+    CRITICAL: ALWAYS prioritizes quarterly data from Group/CONSOLIDATED tables
     Returns: (value, source_term_found)"""
     
     best_value = 0.0
@@ -869,20 +925,27 @@ def find_value_in_dataframes_intelligent(search_terms, dataframes, exact_match=F
             continue
         
         # Check column headers to determine priority
-        # Priority scoring: Quarter Group > Quarter Company > Annual Group > Annual Company
+        # CRITICAL PRIORITY: Quarter Group > Quarter Company > Annual Group > Annual Company
         priority_score = 0
         column_headers = ' '.join([str(col).lower() for col in df.columns])
         
-        # Check for quarterly data (higher priority)
+        # Check for quarterly data (MANDATORY - highest priority)
         quarter_indicators = ['mar', 'jun', 'sep', 'dec', 'q1', 'q2', 'q3', 'q4', '31 mar', '30 jun', '30 sep', '31 dec']
-        if any(indicator in column_headers for indicator in quarter_indicators):
-            priority_score += 20
+        has_quarterly_data = any(indicator in column_headers for indicator in quarter_indicators)
+        if has_quarterly_data:
+            priority_score += 100  # Much higher priority for quarterly data
+        else:
+            # Skip non-quarterly data entirely for SOP metrics
+            continue
         
         # Check for Group vs Company (Group has higher priority)
         if 'group' in column_headers or 'consolidated' in column_headers:
-            priority_score += 10
+            priority_score += 50  # High priority for Group/CONSOLIDATED
         elif 'company' in column_headers:
-            priority_score += 5
+            priority_score += 10  # Lower priority for Company
+        else:
+            # Skip if neither Group nor Company identified
+            continue
         
         # Find the rightmost column (most recent period) - higher priority
         rightmost_col_index = len(df.columns) - 1
@@ -1188,9 +1251,10 @@ def extract_sop_metrics_knowledge_based(tables_dict, extracted_text=""):
 
 
 def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_text=""):
-    """Extract SOP metrics directly from already-loaded pandas DataFrames using AI knowledge."""
+    """Extract SOP metrics directly from already-loaded pandas DataFrames using AI knowledge.
+    ALWAYS prioritizes quarterly data from Group/CONSOLIDATED tables."""
     
-    print("🧠 Starting knowledge-based SOP metrics extraction...")
+    print("🧠 Starting knowledge-based SOP metrics extraction with quarterly Group/CONSOLIDATED priority...")
     
     # Initialize SOP metrics dictionary with tracking
     sop_metrics = {}
@@ -1201,11 +1265,12 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
     # COMPREHENSIVE FINANCIAL METRICS EXTRACTION
     # =====================
     print("📊 Extracting comprehensive financial metrics using AI knowledge...")
+    print("🎯 PRIORITY: Quarterly data from Group/CONSOLIDATED tables only")
     
     # Define comprehensive search patterns based on financial knowledge
     financial_metrics = {
         # REVENUE AND INCOME METRICS
-        'Revenue': {
+        'Revenues': {
             'search_terms': [
                 'revenue', 'total revenue', 'income', 'total income', 'sales', 'turnover',
                 'interest income', 'fee income', 'commission income', 'trading income',
@@ -1214,14 +1279,14 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
             ],
             'calculation_type': 'direct_or_calculated'
         },
-        'Gross Profit': {
+        'Gross profit': {
             'search_terms': [
                 'gross profit', 'gross income', 'net operating income', 'operating income',
                 'gross earnings', 'gross surplus'
             ],
             'calculation_type': 'direct'
         },
-        'Operating Profit': {
+        'Operating Profits': {
             'search_terms': [
                 'operating profit', 'operating income', 'operating earnings', 'ebit',
                 'operating profit before tax', 'operating profit before vat',
@@ -1253,117 +1318,6 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
             'calculation_type': 'direct'
         },
         
-        # BALANCE SHEET METRICS
-        'Total Assets': {
-            'search_terms': [
-                'total assets', 'assets total', 'total asset'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Total Liabilities': {
-            'search_terms': [
-                'total liabilities', 'liabilities total', 'total liability'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Total Equity': {
-            'search_terms': [
-                'total equity', 'equity total', 'shareholders equity', 'stockholders equity'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Cash': {
-            'search_terms': [
-                'cash', 'cash and cash equivalents', 'cash equivalents', 'cash and bank balances'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Fixed Assets': {
-            'search_terms': [
-                'property, plant, equipment and right-of-use assets', 'fixed assets',
-                'property, plant and equipment', 'ppe', 'tangible assets'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Current Assets': {
-            'search_terms': [
-                'current assets', 'total current assets'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Current Liabilities': {
-            'search_terms': [
-                'current liabilities', 'total current liabilities'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Inventories': {
-            'search_terms': [
-                'inventories', 'stock', 'inventory', 'raw materials', 'finished goods'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Trade Receivables': {
-            'search_terms': [
-                'trade receivables', 'accounts receivable', 'debtors',
-                'financial assets at amortized cost - financing and receivables to other customers',
-                'loans and advances to customers', 'customer receivables'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Trade Payables': {
-            'search_terms': [
-                'trade payables', 'accounts payable', 'creditors', 'suppliers payable'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Total Debt': {
-            'search_terms': [
-                'total debt', 'total borrowings', 'debt', 'borrowings',
-                'short term borrowings', 'long term borrowings', 'bank borrowings'
-            ],
-            'calculation_type': 'direct'
-        },
-        
-        # CASH FLOW METRICS
-        'Cash From Operating Activities': {
-            'search_terms': [
-                'net cash from / (used in) operating activities', 'cash from operating activities',
-                'operating cash flow', 'net cash from operating'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Cash From Investing Activities': {
-            'search_terms': [
-                'net cash from / (used in) investing activities', 'cash from investing activities',
-                'investing cash flow', 'net cash from investing'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Cash From Financing Activities': {
-            'search_terms': [
-                'net cash from / (used in) financing activities', 'cash from financing activities',
-                'financing cash flow', 'net cash from financing'
-            ],
-            'calculation_type': 'direct'
-        },
-        
-        # DEPRECIATION AND AMORTIZATION
-        'Depreciation': {
-            'search_terms': [
-                'depreciation and amortization of property, plant, equipment and right-of-use assets',
-                'depreciation of property, plant and equipment', 'depreciation expense',
-                'depreciation', 'depreciation and amortization'
-            ],
-            'calculation_type': 'direct'
-        },
-        'Amortization': {
-            'search_terms': [
-                'amortization', 'amortization expense', 'amortization of intangible assets'
-            ],
-            'calculation_type': 'direct'
-        },
-        
         # INTEREST METRICS
         'Interest Income': {
             'search_terms': [
@@ -1378,22 +1332,152 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
             'calculation_type': 'direct'
         },
         
+        # BALANCE SHEET METRICS
+        'Fixed Assets': {
+            'search_terms': [
+                'property, plant, equipment and right-of-use assets', 'fixed assets',
+                'property, plant and equipment', 'ppe', 'tangible assets'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Inventory': {
+            'search_terms': [
+                'inventories', 'stock', 'inventory', 'raw materials', 'finished goods'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Trade Receivables': {
+            'search_terms': [
+                'trade receivables', 'accounts receivable', 'debtors',
+                'financial assets at amortized cost - financing and receivables to other customers',
+                'loans and advances to customers', 'customer receivables'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Cash': {
+            'search_terms': [
+                'cash', 'cash and cash equivalents', 'cash equivalents', 'cash and bank balances'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Current Assets': {
+            'search_terms': [
+                'current assets', 'total current assets'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Total Assets': {
+            'search_terms': [
+                'total assets', 'assets total', 'total asset'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Total Equity': {
+            'search_terms': [
+                'total equity', 'equity total', 'shareholders equity', 'stockholders equity'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Trade Payables': {
+            'search_terms': [
+                'trade payables', 'accounts payable', 'creditors', 'suppliers payable'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Current Liabilities': {
+            'search_terms': [
+                'current liabilities', 'total current liabilities'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Total Liabilities': {
+            'search_terms': [
+                'total liabilities', 'liabilities total', 'total liability'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Total Debt': {
+            'search_terms': [
+                'total debt', 'total borrowings', 'debt', 'borrowings',
+                'short term borrowings', 'long term borrowings', 'bank borrowings'
+            ],
+            'calculation_type': 'direct'
+        },
+        
+        # CASH FLOW METRICS (QUARTERLY)
+        'OCF Qtrly': {
+            'search_terms': [
+                'net cash from / (used in) operating activities', 'cash from operating activities',
+                'operating cash flow', 'net cash from operating'
+            ],
+            'calculation_type': 'direct'
+        },
+        'ICF Qtrly': {
+            'search_terms': [
+                'net cash from / (used in) investing activities', 'cash from investing activities',
+                'investing cash flow', 'net cash from investing'
+            ],
+            'calculation_type': 'direct'
+        },
+        'FCF Qtrly': {
+            'search_terms': [
+                'net cash from / (used in) financing activities', 'cash from financing activities',
+                'financing cash flow', 'net cash from financing'
+            ],
+            'calculation_type': 'direct'
+        },
+        
+        # DEPRECIATION AND AMORTIZATION (QUARTERLY)
+        'Depreciation Qtrly': {
+            'search_terms': [
+                'depreciation and amortization of property, plant, equipment and right-of-use assets',
+                'depreciation of property, plant and equipment', 'depreciation expense',
+                'depreciation', 'depreciation and amortization'
+            ],
+            'calculation_type': 'direct'
+        },
+        'Amortization Qtrly': {
+            'search_terms': [
+                'amortization', 'amortization expense', 'amortization of intangible assets'
+            ],
+            'calculation_type': 'direct'
+        },
+        
+        # CAPITAL EXPENDITURE (QUARTERLY)
+        'Capital Exp Qtrly': {
+            'search_terms': [
+                'acquisition of property, plant & equipment', 'acquisition of intangible assets',
+                'purchase of property, plant and equipment', 'additions to property, plant and equipment',
+                'capital expenditure', 'capex'
+            ],
+            'calculation_type': 'direct'
+        },
+        
+        # NET BORROWINGS (QUARTERLY)
+        'Net Borrowings Qrtly': {
+            'search_terms': [
+                'net borrowings', 'short term borrowings', 'long term borrowings',
+                'principal element of lease payment', 'lease payments'
+            ],
+            'calculation_type': 'direct'
+        },
+        
         # SHARE AND MARKET METRICS
-        'Share Price': {
+        'Share Price Quaterly': {
             'search_terms': [
                 'share price', 'price per share', 'market price', 'last traded',
                 'market price of ordinary share', 'stock price', 'last traded price'
             ],
             'calculation_type': 'direct'
         },
-        'Total Number of Issued Shares': {
+        'Tot. No. of Shares': {
             'search_terms': [
                 'total number of issued shares', 'number of shares', 'ordinary shares',
                 'number of ordinary shares', 'issued shares', 'total shares'
             ],
             'calculation_type': 'direct'
         },
-        'Eps': {
+        'EPS Actuals': {
             'search_terms': [
                 'earnings per share', 'eps', 'basic earnings per share', 'earning per share',
                 'earnings per share - basic / diluted (in rs.)', 'basic eps'
@@ -1431,7 +1515,7 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
             if to_number(value, 0.0) == 0.0 and not (isinstance(value, str) and value.strip() in ['-', '--', '---']):
                 # If not found directly, try to calculate from components
                 print(f"  🔧 {metric_name} not found directly, attempting calculation...")
-                if metric_name == 'Revenue':
+                if metric_name == 'Revenues':
                     value, revenue_components = calculate_revenue_from_components(dataframes)
                     sop_calculations[metric_name] = " + ".join(revenue_components) if revenue_components else "No components found"
                     source_term = "Calculated from components"
@@ -1453,8 +1537,8 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
     print("\n🧮 Calculating derived metrics using financial knowledge...")
     
     # Market Capitalization = Share Price × Total Number of Issued Shares
-    share_price = to_number(sop_metrics.get('Share Price', 0), 0.0)
-    total_shares = to_number(sop_metrics.get('Total Number of Issued Shares', 0), 0.0)
+    share_price = to_number(sop_metrics.get('Share Price Quaterly', 0), 0.0)
+    total_shares = to_number(sop_metrics.get('Tot. No. of Shares', 0), 0.0)
     if share_price > 0 and total_shares > 0:
         market_cap = share_price * total_shares
         sop_metrics['Market Capitalization'] = market_cap
@@ -1462,15 +1546,15 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
         sop_calculations['Market Capitalization'] = f"{share_price:,.2f} × {total_shares:,.0f} = {market_cap:,.2f}"
         print(f"  ✅ Market Capitalization: {market_cap:,.2f}")
     
-    # Net Change in Cash = Operating + Investing + Financing
-    operating_cash = to_number(sop_metrics.get('Cash From Operating Activities', 0), 0.0)
-    investing_cash = to_number(sop_metrics.get('Cash From Investing Activities', 0), 0.0)
-    financing_cash = to_number(sop_metrics.get('Cash From Financing Activities', 0), 0.0)
+    # Net Change in Cash = Operating + Investing + Financing (Quarterly)
+    operating_cash = to_number(sop_metrics.get('OCF Qtrly', 0), 0.0)
+    investing_cash = to_number(sop_metrics.get('ICF Qtrly', 0), 0.0)
+    financing_cash = to_number(sop_metrics.get('FCF Qtrly', 0), 0.0)
     net_change_cash = operating_cash + investing_cash + financing_cash
-    sop_metrics['Net Change In Cash'] = net_change_cash
-    sop_source_terms['Net Change In Cash'] = "Calculated from cash flows"
-    sop_calculations['Net Change In Cash'] = f"{operating_cash:,.2f} + {investing_cash:,.2f} + {financing_cash:,.2f} = {net_change_cash:,.2f}"
-    print(f"  ✅ Net Change In Cash: {net_change_cash:,.2f}")
+    sop_metrics['Net Change In Cash Qtrly'] = net_change_cash
+    sop_source_terms['Net Change In Cash Qtrly'] = "Calculated from quarterly cash flows"
+    sop_calculations['Net Change In Cash Qtrly'] = f"{operating_cash:,.2f} + {investing_cash:,.2f} + {financing_cash:,.2f} = {net_change_cash:,.2f}"
+    print(f"  ✅ Net Change In Cash Qtrly: {net_change_cash:,.2f}")
     
     # Enterprise Value = Market Cap + Total Debt - Cash
     market_cap = to_number(sop_metrics.get('Market Capitalization', 0), 0.0)
@@ -1484,7 +1568,7 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
     
     # Tax Rate = (Taxation / Revenue) × 100
     taxation = to_number(sop_metrics.get('Taxation', 0), 0.0)
-    revenue = to_number(sop_metrics.get('Revenue', 0), 0.0)
+    revenue = to_number(sop_metrics.get('Revenues', 0), 0.0)
     if revenue != 0:
         tax_rate = (abs(taxation) / revenue) * 100
         sop_metrics['Tax Rate'] = tax_rate
@@ -1507,36 +1591,45 @@ def extract_sop_metrics_from_dataframes_knowledge_based(dataframes, extracted_te
         effective_tax_rate = 0.0
         sop_metrics['Effective Tax Rate'] = effective_tax_rate
     
-    # Capital Expenditure = Acquisition of Property, Plant & Equipment + Acquisition of Intangible Assets
-    capex_components = [
-        'acquisition of property, plant & equipment',
-        'acquisition of intangible assets',
-        'purchase of property, plant and equipment',
-        'additions to property, plant and equipment'
-    ]
-    capital_expenditure = 0.0
-    capex_details = []
-    for component in capex_components:
-        value, source_term = find_value_in_dataframes_intelligent([component], dataframes)
-        if value != 0:
-            capital_expenditure += abs(value)  # Make positive (usually negative in cash flow)
-            capex_details.append(f"{component}: {abs(value):,.2f}")
+    # Capital Expenditure (Quarterly) - already extracted as 'Capital Exp Qtrly'
+    capital_expenditure = to_number(sop_metrics.get('Capital Exp Qtrly', 0), 0.0)
+    if capital_expenditure == 0:
+        # Try to calculate from components if not found directly
+        capex_components = [
+            'acquisition of property, plant & equipment',
+            'acquisition of intangible assets',
+            'purchase of property, plant and equipment',
+            'additions to property, plant and equipment'
+        ]
+        capex_details = []
+        for component in capex_components:
+            value, source_term = find_value_in_dataframes_intelligent([component], dataframes)
+            if value != 0:
+                capital_expenditure += abs(value)  # Make positive (usually negative in cash flow)
+                capex_details.append(f"{component}: {abs(value):,.2f}")
+        
+        if capital_expenditure > 0:
+            sop_metrics['Capital Exp Qtrly'] = capital_expenditure
+            sop_source_terms['Capital Exp Qtrly'] = "Calculated from components"
+            sop_calculations['Capital Exp Qtrly'] = " + ".join(capex_details) if capex_details else "No components found"
     
-    sop_metrics['Capital Expenditure (OUTFLOW)'] = capital_expenditure
-    sop_source_terms['Capital Expenditure (OUTFLOW)'] = "Calculated from components"
-    sop_calculations['Capital Expenditure (OUTFLOW)'] = " + ".join(capex_details) if capex_details else "No components found"
-    print(f"  ✅ Capital Expenditure: {capital_expenditure:,.2f}")
+    print(f"  ✅ Capital Exp Qtrly: {capital_expenditure:,.2f}")
     
-    # Net Borrowings = Short term borrowings + Long term borrowings - Principal element of lease payment
-    short_term_borrowings, _ = find_value_in_dataframes_intelligent(['short term borrowings', 'short-term borrowings'], dataframes)
-    long_term_borrowings, _ = find_value_in_dataframes_intelligent(['long term borrowings', 'long-term borrowings'], dataframes)
-    lease_payments, _ = find_value_in_dataframes_intelligent(['principal element of lease payment', 'lease payments'], dataframes)
+    # Net Borrowings (Quarterly) - already extracted as 'Net Borrowings Qrtly'
+    net_borrowings = to_number(sop_metrics.get('Net Borrowings Qrtly', 0), 0.0)
+    if net_borrowings == 0:
+        # Try to calculate from components if not found directly
+        short_term_borrowings, _ = find_value_in_dataframes_intelligent(['short term borrowings', 'short-term borrowings'], dataframes)
+        long_term_borrowings, _ = find_value_in_dataframes_intelligent(['long term borrowings', 'long-term borrowings'], dataframes)
+        lease_payments, _ = find_value_in_dataframes_intelligent(['principal element of lease payment', 'lease payments'], dataframes)
+        
+        net_borrowings = short_term_borrowings + long_term_borrowings - lease_payments
+        if net_borrowings != 0:
+            sop_metrics['Net Borrowings Qrtly'] = net_borrowings
+            sop_source_terms['Net Borrowings Qrtly'] = "Calculated from borrowings and lease payments"
+            sop_calculations['Net Borrowings Qrtly'] = f"{short_term_borrowings:,.2f} + {long_term_borrowings:,.2f} - {lease_payments:,.2f} = {net_borrowings:,.2f}"
     
-    net_borrowings = short_term_borrowings + long_term_borrowings - lease_payments
-    sop_metrics['Net Borrowings'] = net_borrowings
-    sop_source_terms['Net Borrowings'] = "Calculated from borrowings and lease payments"
-    sop_calculations['Net Borrowings'] = f"{short_term_borrowings:,.2f} + {long_term_borrowings:,.2f} - {lease_payments:,.2f} = {net_borrowings:,.2f}"
-    print(f"  ✅ Net Borrowings: {net_borrowings:,.2f}")
+    print(f"  ✅ Net Borrowings Qrtly: {net_borrowings:,.2f}")
     
     print(f"\n📋 Knowledge-based SOP Extraction Summary:")
     print(f"  📊 Total metrics processed: {len(sop_metrics)}")
@@ -1815,7 +1908,7 @@ def process_annual_report(pdf_path, output_filename=None):
 # =====================
 if __name__ == "__main__":
     # Update this path to your PDF file
-    pdf_path = "ACL.pdf"  # You can also use full path like r"D:\path\to\your\file.pdf"
+    pdf_path = "bairaha.pdf"  # You can also use full path like r"D:\path\to\your\file.pdf"
     
     # Process the annual report
     result_file = process_annual_report(pdf_path)

@@ -647,7 +647,72 @@ def extract_changes_in_equity(text):
     return call_openrouter(messages)
 
 def extract_cash_flows(text):
-    return extract_table(text, "STATEMENT OF CASH FLOWS")
+    """Enhanced cashflow extraction that can handle both quarterly and annual data, and both Group and Company tables"""
+    system_prompt = f"""You are an expert financial data extractor specializing in annual reports.
+    
+    Your task: Find and extract the "STATEMENT OF CASH FLOWS" table from the provided text.
+    
+    PRIORITY RULES (in order of preference):
+    1. **QUARTERLY DATA PREFERRED**: Look for quarterly data first (Q1, Q2, Q3, Q4, or quarter-end dates like "31 Mar", "30 Jun", "30 Sep", "31 Dec")
+    2. **GROUP/CONSOLIDATED PREFERRED**: Look for "Group" or "CONSOLIDATED" tables first
+    3. **FALLBACK TO ANNUAL**: If no quarterly data found, use annual data
+    4. **FALLBACK TO COMPANY**: If no Group/CONSOLIDATED data found, use Company data
+    5. **MOST RECENT PERIOD**: When multiple periods are available, prioritize the most recent period
+    
+    CRITICAL EXTRACTION REQUIREMENTS:
+    1. **INCLUDE ALL ROW DESCRIPTIONS**: Always include the full description/name of each line item in the first column
+    2. **PRESERVE ITEM HIERARCHY**: Maintain the structure of main items, sub-items, and totals exactly as shown
+    3. **COMPLETE LINE ITEMS**: Don't abbreviate or truncate the descriptions of financial statement items
+    4. **EXACT COLUMN HEADERS**: Use the original column titles from the document without modification
+    5. **ALL NUMERICAL VALUES**: Include every number exactly as shown (including ('000) notation)
+    6. **PRESERVE DASHES**: When a column has a dash (-), keep it as a dash - do NOT replace with values from other columns
+    7. **MAINTAIN COLUMN ALIGNMENT**: Ensure each value stays in its correct column - dashes indicate no value for that period
+    8. **PROPER FORMATTING**: Create a clean markdown table but preserve all original content and alignment
+    
+    WHAT TO INCLUDE:
+    ✅ Full line item descriptions (e.g., "Cash from operating activities", "Cash from investing activities", etc.)
+    ✅ All numerical values in their original format
+    ✅ Sub-totals and totals with proper hierarchy
+    ✅ Notes and references attached to line items
+    ✅ Original column headers with dates and units
+    ✅ All rows including zeros and blank entries
+    
+    WHAT TO AVOID:
+    ❌ Empty columns that are just separators (|, ---, spaces only)
+    ❌ Abbreviating or shortening line item descriptions
+    ❌ Modifying numerical values or formats
+    ❌ Changing column header names
+    ❌ Omitting any rows or data
+    
+    TABLE SELECTION LOGIC (FLEXIBLE):
+    - FIRST try to find tables with "Group" or "CONSOLIDATED" in the title with quarterly dates
+    - THEN try to find tables with "Group" or "CONSOLIDATED" in the title with annual dates
+    - THEN try to find tables with "Company" in the title with quarterly dates
+    - FINALLY try to find tables with "Company" in the title with annual dates
+    - If no cashflow table found at all, return "No cashflow data found"
+    
+    EXAMPLE FORMAT:
+    | Line Item Description | 2024 Rs.'000 | 2023 Rs.'000 |
+    |----------------------|--------------|--------------|
+    | Cash from operating activities | 150,000 | 140,000 |
+    | Cash from investing activities | (50,000) | (45,000) |
+    | Cash from financing activities | (20,000) | (15,000) |
+    | Net change in cash | 80,000 | 80,000 |
+    
+    QUALITY CHECKS (MANDATORY):
+    - Every row has a meaningful description in the first column
+    - All numerical values are preserved with original formatting
+    - Column headers match the source document exactly
+    - Hierarchical structure is maintained (main items, sub-items, totals)
+    - If no cashflow data exists, return appropriate message
+    
+    Return ONLY the clean markdown table with complete descriptions and original headers. No explanations, no extra text."""
+
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": text}
+    ]
+    return call_openrouter(messages)
 
 # Explanatory notes extraction removed as per user request
 
@@ -929,14 +994,20 @@ def find_value_in_dataframes_intelligent(search_terms, dataframes, exact_match=F
         priority_score = 0
         column_headers = ' '.join([str(col).lower() for col in df.columns])
         
-        # Check for quarterly data (MANDATORY - highest priority)
+        # Check for quarterly data (PREFERRED - highest priority)
         quarter_indicators = ['mar', 'jun', 'sep', 'dec', 'q1', 'q2', 'q3', 'q4', '31 mar', '30 jun', '30 sep', '31 dec']
         has_quarterly_data = any(indicator in column_headers for indicator in quarter_indicators)
         if has_quarterly_data:
             priority_score += 100  # Much higher priority for quarterly data
         else:
-            # Skip non-quarterly data entirely for SOP metrics
-            continue
+            # For cashflow metrics, also allow annual data as fallback
+            annual_indicators = ['2024', '2023', '2022', '2021', '2020', 'year', 'annual']
+            has_annual_data = any(indicator in column_headers for indicator in annual_indicators)
+            if has_annual_data:
+                priority_score += 50  # Lower priority for annual data
+            else:
+                # Skip if neither quarterly nor annual data found
+                continue
         
         # Check for Group vs Company (Group has higher priority)
         if 'group' in column_headers or 'consolidated' in column_headers:
@@ -944,8 +1015,8 @@ def find_value_in_dataframes_intelligent(search_terms, dataframes, exact_match=F
         elif 'company' in column_headers:
             priority_score += 10  # Lower priority for Company
         else:
-            # Skip if neither Group nor Company identified
-            continue
+            # For cashflow metrics, also allow data without explicit Group/Company designation
+            priority_score += 5  # Very low priority for unidentified data
         
         # Find the rightmost column (most recent period) - higher priority
         rightmost_col_index = len(df.columns) - 1
